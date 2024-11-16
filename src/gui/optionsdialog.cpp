@@ -53,6 +53,7 @@
 #include "base/bittorrent/sharelimitaction.h"
 #include "base/exceptions.h"
 #include "base/global.h"
+#include "base/net/downloadmanager.h"
 #include "base/net/portforwarder.h"
 #include "base/net/proxyconfigurationmanager.h"
 #include "base/path.h"
@@ -72,6 +73,7 @@
 #include "addnewtorrentdialog.h"
 #include "advancedsettings.h"
 #include "banlistoptionsdialog.h"
+#include "shadowbanlistoptionsdialog.h"
 #include "interfaces/iguiapplication.h"
 #include "ipsubnetwhitelistoptionsdialog.h"
 #include "rss/automatedrssdownloader.h"
@@ -918,6 +920,8 @@ void OptionsDialog::loadConnectionTabOptions()
     m_ui->IpFilterRefreshBtn->setEnabled(m_ui->checkIPFilter->isChecked());
     m_ui->checkIpFilterTrackers->setChecked(session->isTrackerFilteringEnabled());
 
+    m_ui->shadowBanEnabled->setChecked(session->isShadowBanEnabled());
+
     connect(m_ui->comboProtocol, qComboBoxCurrentIndexChanged, this, &ThisType::enableApplyButton);
     connect(m_ui->spinPort, qSpinBoxValueChanged, this, &ThisType::enableApplyButton);
     connect(m_ui->checkUPnP, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
@@ -963,6 +967,7 @@ void OptionsDialog::loadConnectionTabOptions()
     connect(m_ui->checkIPFilter, &QAbstractButton::toggled, m_ui->IpFilterRefreshBtn, &QWidget::setEnabled);
     connect(m_ui->textFilterPath, &FileSystemPathEdit::selectedPathChanged, this, &ThisType::enableApplyButton);
     connect(m_ui->checkIpFilterTrackers, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
+    connect(m_ui->shadowBanEnabled, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
 }
 
 void OptionsDialog::saveConnectionTabOptions() const
@@ -1006,6 +1011,9 @@ void OptionsDialog::saveConnectionTabOptions() const
     session->setIPFilteringEnabled(isIPFilteringEnabled());
     session->setTrackerFilteringEnabled(m_ui->checkIpFilterTrackers->isChecked());
     session->setIPFilterFile(m_ui->textFilterPath->selectedPath());
+
+    // Shadowban
+    session->setShadowBan(m_ui->shadowBanEnabled->isChecked());
 }
 
 void OptionsDialog::loadSpeedTabOptions()
@@ -1104,6 +1112,9 @@ void OptionsDialog::loadBittorrentTabOptions()
         m_ui->spinMaxRatio->setEnabled(true);
         m_ui->comboRatioLimitAct->setEnabled(true);
         m_ui->spinMaxRatio->setValue(session->globalMaxRatio());
+        m_ui->checkAutoUpdateTrackers->setChecked(session->isAutoUpdateTrackersEnabled());
+        m_ui->textCustomizeTrackersListUrl->setText(pref->customizeTrackersListUrl());
+        m_ui->textPublicTrackers->setPlainText(session->publicTrackers());
     }
     else
     {
@@ -1150,6 +1161,8 @@ void OptionsDialog::loadBittorrentTabOptions()
 
     m_ui->checkEnableAddTrackers->setChecked(session->isAddTrackersEnabled());
     m_ui->textTrackers->setPlainText(session->additionalTrackers());
+    connect(m_ui->checkAutoUpdateTrackers, &QGroupBox::toggled, this, &ThisType::enableApplyButton);
+    connect(m_ui->textCustomizeTrackersListUrl, &QLineEdit::textChanged, this, &ThisType::enableApplyButton);
 
     connect(m_ui->checkDHT, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
     connect(m_ui->checkPeX, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
@@ -1188,6 +1201,7 @@ void OptionsDialog::loadBittorrentTabOptions()
 
 void OptionsDialog::saveBittorrentTabOptions() const
 {
+    auto *pref = Preferences::instance();
     auto *session = BitTorrent::Session::instance();
 
     session->setDHTEnabled(isDHTEnabled());
@@ -1221,6 +1235,9 @@ void OptionsDialog::saveBittorrentTabOptions() const
 
     session->setAddTrackersEnabled(m_ui->checkEnableAddTrackers->isChecked());
     session->setAdditionalTrackers(m_ui->textTrackers->toPlainText());
+
+    session->setAutoUpdateTrackersEnabled(m_ui->checkAutoUpdateTrackers->isChecked());
+    pref->setCustomizeTrackersListUrl(m_ui->textCustomizeTrackersListUrl->text());
 }
 
 void OptionsDialog::loadRSSTabOptions()
@@ -1470,6 +1487,11 @@ void OptionsDialog::saveOptions() const
 bool OptionsDialog::isIPFilteringEnabled() const
 {
     return m_ui->checkIPFilter->isChecked();
+}
+
+bool OptionsDialog::isShadowBanEnabled() const
+{
+    return m_ui->shadowBanEnabled->isChecked();
 }
 
 Net::ProxyType OptionsDialog::getProxyType() const
@@ -2055,10 +2077,38 @@ void OptionsDialog::on_banListButton_clicked()
     dialog->open();
 }
 
+void OptionsDialog::on_shadowBanListButton_clicked()
+{
+    auto *dialog = new ShadowBanListOptionsDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &QDialog::accepted, this, &OptionsDialog::enableApplyButton);
+    dialog->open();
+}
+
 void OptionsDialog::on_IPSubnetWhitelistButton_clicked()
 {
     auto *dialog = new IPSubnetWhitelistOptionsDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     connect(dialog, &QDialog::accepted, this, &OptionsDialog::enableApplyButton);
     dialog->open();
+}
+
+void OptionsDialog::on_fetchButton_clicked()
+{
+    Net::DownloadHandler *m_fetchHandler = Net::DownloadManager::instance()->download(Net::DownloadRequest(Preferences::instance()->customizeTrackersListUrl()), Preferences::instance()->useProxyForGeneralPurposes());
+    connect(m_fetchHandler, &Net::DownloadHandler::finished, this, &OptionsDialog::handlePublicTrackersListChanged);
+}
+
+void OptionsDialog::handlePublicTrackersListChanged(const Net::DownloadResult &result)
+{
+    switch (result.status) {
+        case Net::DownloadStatus::Success:
+            BitTorrent::Session::instance()->setPublicTrackers(QString::fromUtf8(result.data.data()));
+            m_ui->textPublicTrackers->setPlainText(QString::fromUtf8(result.data.data()));
+            m_ui->fetchButton->setEnabled(false);
+            m_ui->fetchButton->setText(u"Fetched!"_s);
+            break;
+        default:
+            m_ui->textPublicTrackers->setPlainText(u"Refetch failed. Reason: "_s + result.errorString);
+    }
 }
